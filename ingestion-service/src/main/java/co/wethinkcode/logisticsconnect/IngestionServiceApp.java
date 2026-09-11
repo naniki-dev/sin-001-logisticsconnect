@@ -47,6 +47,7 @@ public class IngestionServiceApp {
         activeLookup.put("false", false);
         activeLookup.put("0", false);
 
+        Map<String, List<Hubs>> groups = new HashMap<>();
 
         // creates reader and handles errors
         try (BufferedReader reader = new BufferedReader(
@@ -81,12 +82,52 @@ public class IngestionServiceApp {
                 Boolean cleanActive = activeLookup.get(activeKey);
 
                 Hubs hub = new Hubs(cleanHubId, cleanProvince, cleanSortingCenter, cleanActive);
-                hubs.add(hub);
+
+                String key = cleanProvince + "|" + cleanSortingCenter;
+                // If this key has no group yet, create an empty list for it; otherwise reuse the existing one
+                // then add this hub to it
+                groups.computeIfAbsent(key, k -> new ArrayList<>()).add(hub);
             }
 
 
         } catch (IOException e) {
             e.printStackTrace();
+        }
+
+        // checks the groups to see any duplicate hubs, removes the duplicates
+        for (List<Hubs> group : groups.values()) {
+            Hubs lowestIdHub = group.get(0);
+            int trueCount = 0;
+            int falseCount = 0;
+
+            for (Hubs h : group) {
+                if (h.getHubId().compareTo(lowestIdHub.getHubId()) < 0) {
+                    lowestIdHub = h;
+                }
+                if (Boolean.TRUE.equals(h.getActive())) {
+                    trueCount++;
+                } else if (Boolean.FALSE.equals(h.getActive())) {
+                    falseCount++;
+                }
+            }
+
+            Boolean resolvedActive;
+            if (trueCount > falseCount) {
+                resolvedActive = true;
+            } else if (falseCount > trueCount) {
+                resolvedActive = false;
+            } else {
+                resolvedActive = null;
+            }
+
+            Hubs resolvedHub = new Hubs(
+                    lowestIdHub.getHubId(),
+                    lowestIdHub.getProvince(),
+                    lowestIdHub.getSortingCenter(),
+                    resolvedActive
+            );
+
+            hubs.add(resolvedHub);
         }
 
         // exposes the cleaned records - Javalin's ctx.json() automatically
