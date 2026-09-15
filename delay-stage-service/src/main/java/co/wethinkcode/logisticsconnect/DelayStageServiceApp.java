@@ -2,7 +2,11 @@ package co.wethinkcode.logisticsconnect;
 
 import io.javalin.Javalin;
 
+import java.util.HashMap;
+import java.util.Map;
+
 public class DelayStageServiceApp {
+    static Map<String, Integer> stages = new HashMap<>();
 
     public static void main(String[] args) {
         Javalin app = Javalin.create().start(7052);
