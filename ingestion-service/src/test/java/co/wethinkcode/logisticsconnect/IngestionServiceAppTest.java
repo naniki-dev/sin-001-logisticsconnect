@@ -10,6 +10,7 @@ import java.io.StringReader;
 import java.util.List;
 
 public class IngestionServiceAppTest {
+    // all of them are unit tests
     @Test
     void cleansProvinceCasing() {
         assertEquals("Gauteng", IngestionServiceApp.cleanProvince("gauteng", provinceLookup()));
