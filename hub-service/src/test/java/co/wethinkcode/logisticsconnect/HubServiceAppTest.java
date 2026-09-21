@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.javalin.testtools.JavalinTest;
 import org.junit.jupiter.api.Test;
-import static co.wethinkcode.logisticsconnect.HubServiceApp.*;
 
 import java.util.Map;
 
