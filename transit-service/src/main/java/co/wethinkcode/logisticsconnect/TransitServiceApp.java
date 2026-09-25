@@ -1,25 +1,30 @@
 package co.wethinkcode.logisticsconnect;
 
+import co.wethinkcode.logisticsconnect.mq.MqConfig;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.javalin.Javalin;
+import org.apache.activemq.ActiveMQConnectionFactory;
 
+import javax.jms.*;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class TransitServiceApp {
 
     static final String HUB_SERVICE_URL = "http://localhost:7051";
-    static final String DELAY_STAGE_SERVICE_URL = "http://localhost:7052";
 
-    // stand-in base travel times per province, in minutes - used since the ingested
-    // hub data has no real distance/travel-time field to draw from
+    // replaces the old synchronous call to delay-stage-service - kept up to date
+    // by the MQ subscription set up in main(), so reads here are just a local lookup
+    static final Map<String, Integer> latestStageByHub = new ConcurrentHashMap<>();
+
     static final Map<String, Integer> PROVINCE_BASE_MINUTES = provinceBaseMinutes();
-    static final int DEFAULT_BASE_MINUTES = 90; // fallback for an unmapped/"Unknown" province
+    static final int DEFAULT_BASE_MINUTES = 90;
 
     static Map<String, Integer> provinceBaseMinutes() {
         Map<String, Integer> map = new HashMap<>();
@@ -35,28 +40,43 @@ public class TransitServiceApp {
         return map;
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws JMSException {
+        subscribeToStageUpdates();
         createApp().start(7053);
     }
 
-    // calculates an ETA in minutes from a base travel time plus a per-delay-stage penalty
-    // pure arithmetic - no network, no server, easy to unit test in isolation
+    // sets up a JMS subscriber on package-status-topic that keeps latestStageByHub
+    // updated in the background - this is the "push" replacement for the old GET call
+    static void subscribeToStageUpdates() throws JMSException {
+        ConnectionFactory factory = new ActiveMQConnectionFactory(MqConfig.BROKER_URL);
+        Connection connection = factory.createConnection();
+        connection.start();
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Topic topic = session.createTopic(MqConfig.TOPIC);
+        MessageConsumer consumer = session.createConsumer(topic);
+
+        consumer.setMessageListener(message -> {
+            try {
+                String json = ((TextMessage) message).getText();
+                JsonNode node = new ObjectMapper().readTree(json);
+                latestStageByHub.put(node.get("hubId").asText(), node.get("stage").asInt());
+            } catch (Exception e) {
+                System.err.println("Failed to process stage update message: " + e.getMessage());
+            }
+        });
+    }
+
     static int calculateEta(int baseMinutes, int stage) {
-        // each delay stage adds 30 minutes on top of the base travel time
         return baseMinutes + (stage * 30);
     }
 
-    // looks up the base travel time for a hub's province, falling back to a default
-    // for any province not in the table like "Unknown"
     static int baseMinutesForProvince(String province) {
         return PROVINCE_BASE_MINUTES.getOrDefault(province, DEFAULT_BASE_MINUTES);
     }
 
-    // builds (but does not start) the Javalin app
     static Javalin createApp() {
         Javalin app = Javalin.create();
 
-        // health check endpoint - confirms the service is up
         app.get("/health", ctx -> ctx.result("OK"));
 
         app.get("/eta/{hubId}", ctx -> {
@@ -64,7 +84,6 @@ public class TransitServiceApp {
             HttpClient client = HttpClient.newHttpClient();
             ObjectMapper mapper = new ObjectMapper();
 
-            // fetch hub details from hub-service
             HttpRequest hubReq = HttpRequest.newBuilder(
                     URI.create(HUB_SERVICE_URL + "/hubs/" + hubId)).GET().build();
             HttpResponse<String> hubResp;
@@ -84,24 +103,12 @@ public class TransitServiceApp {
             String province = hub.get("province").asText();
             int baseMinutes = baseMinutesForProvince(province);
 
-            // fetch current delay stage from delay-stage-service
-            HttpRequest stageReq = HttpRequest.newBuilder(
-                    URI.create(DELAY_STAGE_SERVICE_URL + "/delay-stage/" + hubId)).GET().build();
-            HttpResponse<String> stageResp;
-            try {
-                stageResp = client.send(stageReq, HttpResponse.BodyHandlers.ofString());
-            } catch (Exception e) {
-                ctx.status(502).json(Map.of("error", "delay-stage-service unreachable"));
-                return;
-            }
+            // reads from the local map kept fresh by the MQ subscriber, instead of
+            // calling delay-stage-service directly - defaults to 0, same as before
+            int stage = latestStageByHub.getOrDefault(hubId, 0);
 
-            JsonNode stageNode = mapper.readTree(stageResp.body());
-            int stage = stageNode.get("stage").asInt();
-
-            // combine into an ETA
             int eta = calculateEta(baseMinutes, stage);
 
-            // response
             ctx.json(Map.of(
                     "hubId", hubId,
                     "province", province,
